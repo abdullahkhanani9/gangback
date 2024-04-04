@@ -4,7 +4,7 @@ from flask_restful import Api, Resource # used for REST API building
 from datetime import datetime
 from auth_middleware import token_required
 
-from model.users import User
+from model.users import User, db
 
 user_api = Blueprint('user_api', __name__,
                    url_prefix='/api/users')
@@ -30,10 +30,10 @@ class UserAPI:
             # look for password and dob
             password = body.get('password')
             dob = body.get('dob')
-
+            favoritefood = body.get('favoritefood')
             ''' #1: Key code block, setup USER OBJECT '''
             uo = User(name=name, 
-                      uid=uid)
+                      uid=uid, favoritefood=favoritefood)
             
             ''' Additional garbage error checking '''
             # set password if provided
@@ -45,7 +45,6 @@ class UserAPI:
                     uo.dob = datetime.strptime(dob, '%Y-%m-%d').date()
                 except:
                     return {'message': f'Date of birth format error {dob}, must be mm-dd-yyyy'}, 400
-            
             ''' #2: Key Code block to add user to database '''
             # create user in database
             user = uo.create()
@@ -55,24 +54,41 @@ class UserAPI:
             # failure returns error
             return {'message': f'Processed {name}, either a format error or User ID {uid} is duplicate'}, 400
 
-        @token_required()
-        def get(self, _): # Read Method, the _ indicates current_user is not used
+    
+        def get(self): # Read Method
             users = User.query.all()    # read/extract all users from database
             json_ready = [user.read() for user in users]  # prepare output in json
             return jsonify(json_ready)  # jsonify creates Flask response object, more specific to APIs than json.dumps
-   
-        @token_required("Admin")
-        def delete(self, _): # Delete Method
+        
+        @token_required(roles=["Admin","User"])
+        def delete(self, current_user):
             body = request.get_json()
             uid = body.get('uid')
-            user = User.query.filter_by(_uid=uid).first()
-            if user is None:
-                return {'message': f'User {uid} not found'}, 404
-            json = user.read()
-            user.delete() 
-            # 204 is the status code for delete with no json response
-            return f"Deleted user: {json}", 204 # use 200 to test with Postman
-         
+            users = User.query.all()
+            
+            for user in users:
+                if user.uid == uid:
+                    user.delete()
+            return jsonify(user.read())
+
+        def put(self):
+            body = request.get_json() # get the body of the request
+            uid = body.get('uid') # get the UID (Know what to reference)
+            dob = body.get('dob')
+            items = body.get('items')
+            favoritefood = body.get('favoritefood')
+            points = body.get('points')
+            if dob is not None:
+                try:
+                    fdob = datetime.strptime(dob, '%Y-%m-%d').date()
+                except:
+                    return {'message': f'Date of birth format error {dob}, must be mm-dd-yyyy'}, 400
+            users = User.query.all()
+            for user in users:
+                if user.uid == uid:
+                    user.update(uid,'','', '', items, points)
+            return f"{user.read()} Updated"
+    
     class _Security(Resource):
         def post(self):
             try:
@@ -86,17 +102,21 @@ class UserAPI:
                 ''' Get Data '''
                 uid = body.get('uid')
                 if uid is None:
-                    return {'message': f'User ID is missing'}, 401
+                    return {'message': f'User ID is missing'}, 400
                 password = body.get('password')
                 
                 ''' Find user '''
                 user = User.query.filter_by(_uid=uid).first()
                 if user is None or not user.is_password(password):
-                    return {'message': f"Invalid user id or password"}, 401
+                    return {'message': f"Invalid user id or password"}, 400
                 if user:
                     try:
+                        token_payload = {
+                            "_uid":user._uid,
+                            "role": user.role
+                        }
                         token = jwt.encode(
-                            {"_uid": user._uid},
+                            token_payload,
                             current_app.config["SECRET_KEY"],
                             algorithm="HS256"
                         )
@@ -127,9 +147,65 @@ class UserAPI:
                         "error": str(e),
                         "data": None
                 }, 500
+    
+    class _Send(Resource):
+        def post(self):
+            body = request.get_json()
+            uid = body.get('uid')
+            item = body.get('items')
+            users = User.query.all()
+            for user in users:
+                if user.uid == uid:
+                    user.items = json.loads(user.items)
+                    user.items.append(item)
+                    user.items = json.dumps(user.items)
+                    db.session.commit() 
+                    return(f"you just gave {user.name} an item")
 
-            
+    class _Friendrq(Resource):
+        def post(self):
+            body = request.get_json()
+            users = User.query.all()
+            sender = body.get('sender')
+            receiver = body.get('receiver')
+            if sender == receiver:
+                return {"message": "Cannot send friend request to yourself"}, 400
+            for user in users:
+                if user.uid == receiver:
+                    user.friendrq = json.loads(user.friendrq)
+                    if sender in user.friendrq:
+                        return "Friend request already sent", 400
+                    if sender in user.friends:
+                        return "Already friends", 400
+                    user.friendrq.append(sender)
+                    user.friendrq = json.dumps(user.friendrq)
+                    db.session.commit() 
+                    return(f"You sent a friend request to {user.name}")
+        def delete(self):
+            body = request.get_json()
+            action = body.get('action')
+            sender = body.get('sender')
+            receiver = body.get('receiver')
+            users = User.query.all()
+            for user in users:
+                if user.uid == receiver:
+                    user.friendrq = user.friendrq = json.loads(user.friendrq)
+                    if sender not in user.friendrq:
+                        return "Sender is not in the friend request list", 400
+                    user.friendrq.remove(sender)
+                    user.friendrq = json.dumps(user.friendrq)
+                    db.session.commit()
+                    if action == "accepted":
+                        user.friends = json.loads(user.friends)
+                        user.friends.append(sender)
+                        user.friends = json.dumps(user.friends)
+                        db.session.commit()
+                        return(f"You accepted {sender}'s friend request")
+                    else:
+                        return(f"You denied {sender}'s friend request")
+    
     # building RESTapi endpoint
     api.add_resource(_CRUD, '/')
     api.add_resource(_Security, '/authenticate')
-    
+    api.add_resource(_Send, '/send')
+    api.add_resource(_Friendrq, '/friendrq')
